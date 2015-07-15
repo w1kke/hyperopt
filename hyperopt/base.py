@@ -420,9 +420,13 @@ class Trials(object):
     def insert_trial_docs(self, docs):
         """ trials - something like is returned by self.new_trial_docs()
         """
-        docs = [self.assert_valid_trial(SONify(doc))
-                for doc in docs]
-        return self._insert_trial_docs(docs)
+        asserted_docs = []
+        for doc in docs:
+            if isinstance(doc, list):
+                asserted_docs.append(self.assert_valid_trial(doc[0]))
+            else:
+                asserted_docs.append(self.assert_valid_trial(doc))
+        return self._insert_trial_docs(asserted_docs)
 
     def new_trial_ids(self, N):
         aa = len(self._ids)

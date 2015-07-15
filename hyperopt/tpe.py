@@ -314,7 +314,7 @@ def adaptive_parzen_normal_orig(mus, prior_weight, prior_mu, prior_sigma):
     mentioned the term 'elastic' I think?
 
     mus - matrix (N, M) of M, N-dimensional component centers
-    """
+    """    
     mus_orig = np.array(mus)
     mus = np.array(mus)
     assert str(mus.dtype) != 'object'
@@ -459,6 +459,7 @@ def adaptive_parzen_normal(mus, prior_weight, prior_mu, prior_sigma,
     sigma = np.clip(sigma, minsigma, maxsigma)
 
     sigma[prior_pos] = prior_sigma
+
     assert prior_sigma > 0
     assert maxsigma > 0
     assert minsigma > 0
@@ -624,7 +625,6 @@ def ap_filter_trials(o_idxs, o_vals, l_idxs, l_vals, gamma,
     # Splitting is done this way to cope with duplicate loss values.
     n_below = min(int(np.ceil(gamma * np.sqrt(len(l_vals)))), gamma_cap)
     l_order = np.argsort(l_vals)
-
 
     keep_idxs = set(l_idxs[l_order[:n_below]])
     below = [v for i, v in zip(o_idxs, o_vals) if i in keep_idxs]
@@ -809,91 +809,94 @@ def suggest(new_ids, domain, trials, seed,
         linear_forgetting=_default_linear_forgetting,
         ):
 
-    new_id, = new_ids
+    rval = []
+    for new_id in new_ids:
 
-    t0 = time.time()
-    (s_prior_weight, observed, observed_loss, specs, opt_idxs, opt_vals) \
-            = tpe_transform(domain, prior_weight, gamma)
-    tt = time.time() - t0
-    logger.info('tpe_transform took %f seconds' % tt)
+        t0 = time.time()
+        (s_prior_weight, observed, observed_loss, specs, opt_idxs, opt_vals) \
+                = tpe_transform(domain, prior_weight, gamma)
+        tt = time.time() - t0
+        logger.info('tpe_transform took %f seconds' % tt)
 
-    best_docs = dict()
-    best_docs_loss = dict()
-    for doc in trials.trials:
-        # get either this docs own tid or the one that it's from
-        tid = doc['misc'].get('from_tid', doc['tid'])
-        loss = domain.loss(doc['result'], doc['spec'])
-        if loss is None:
-            # -- associate infinite loss to new/running/failed jobs
-            loss = float('inf')
+        best_docs = dict()
+        best_docs_loss = dict()
+        for doc in trials.trials:
+            # get either this docs own tid or the one that it's from
+            tid = doc['misc'].get('from_tid', doc['tid'])
+            loss = domain.loss(doc['result'], doc['spec'])
+            if loss is None:
+                # -- associate infinite loss to new/running/failed jobs
+                loss = float('inf')
+            else:
+                loss = float(loss)
+            best_docs_loss.setdefault(tid, loss)
+            if loss <= best_docs_loss[tid]:
+                best_docs_loss[tid] = loss
+                best_docs[tid] = doc
+
+        tid_docs = best_docs.items()
+        # -- sort docs by order of suggestion
+        #    so that linear_forgetting removes the oldest ones
+        tid_docs.sort()
+        losses = [best_docs_loss[k] for k, v in tid_docs]
+        tids = [k for k, v in tid_docs]
+        docs = [v for k, v in tid_docs]
+
+        if docs:
+            logger.info('TPE using %i/%i trials with best loss %f' % (
+                len(docs), len(trials), min(best_docs_loss.values())))
         else:
-            loss = float(loss)
-        best_docs_loss.setdefault(tid, loss)
-        if loss <= best_docs_loss[tid]:
-            best_docs_loss[tid] = loss
-            best_docs[tid] = doc
+            logger.info('TPE using 0 trials')
 
-    tid_docs = best_docs.items()
-    # -- sort docs by order of suggestion
-    #    so that linear_forgetting removes the oldest ones
-    tid_docs.sort()
-    losses = [best_docs_loss[k] for k, v in tid_docs]
-    tids = [k for k, v in tid_docs]
-    docs = [v for k, v in tid_docs]
+        if len(docs) < n_startup_jobs:
+            # N.B. THIS SEEDS THE RNG BASED ON THE new_id
+            return rand.suggest(new_ids, domain, trials, seed)
 
-    if docs:
-        logger.info('TPE using %i/%i trials with best loss %f' % (
-            len(docs), len(trials), min(best_docs_loss.values())))
-    else:
-        logger.info('TPE using 0 trials')
+        #    Sample and compute log-probability.
+        if tids:
+            # -- the +2 co-ordinates with an assertion above
+            #    to ensure that fake ids are used during sampling
+            fake_id_0 = max(max(tids), new_id) + 2
+        else:
+            # -- weird - we're running the TPE algo from scratch
+            assert n_startup_jobs <= 0
+            fake_id_0 = new_id + 2
 
-    if len(docs) < n_startup_jobs:
-        # N.B. THIS SEEDS THE RNG BASED ON THE new_id
-        return rand.suggest(new_ids, domain, trials, seed)
+        fake_ids = range(fake_id_0, fake_id_0 + n_EI_candidates)
 
-    #    Sample and compute log-probability.
-    if tids:
-        # -- the +2 co-ordinates with an assertion above
-        #    to ensure that fake ids are used during sampling
-        fake_id_0 = max(max(tids), new_id) + 2
-    else:
-        # -- weird - we're running the TPE algo from scratch
-        assert n_startup_jobs <= 0
-        fake_id_0 = new_id + 2
+        # -- this dictionary will map pyll nodes to the values
+        #    they should take during the evaluation of the pyll program
+        memo = {
+            domain.s_new_ids: fake_ids,
+            domain.s_rng: np.random.RandomState(seed),
+               }
 
-    fake_ids = range(fake_id_0, fake_id_0 + n_EI_candidates)
+        o_idxs_d, o_vals_d = miscs_to_idxs_vals(
+            [d['misc'] for d in docs], keys=domain.params.keys())
+        memo[observed['idxs']] = o_idxs_d
+        memo[observed['vals']] = o_vals_d
 
-    # -- this dictionary will map pyll nodes to the values
-    #    they should take during the evaluation of the pyll program
-    memo = {
-        domain.s_new_ids: fake_ids,
-        domain.s_rng: np.random.RandomState(seed),
-           }
+        memo[observed_loss['idxs']] = tids
+        memo[observed_loss['vals']] = losses
 
-    o_idxs_d, o_vals_d = miscs_to_idxs_vals(
-        [d['misc'] for d in docs], keys=domain.params.keys())
-    memo[observed['idxs']] = o_idxs_d
-    memo[observed['vals']] = o_vals_d
+        idxs, vals = pyll.rec_eval([opt_idxs, opt_vals], memo=memo,
+                print_node_on_error=False)
 
-    memo[observed_loss['idxs']] = tids
-    memo[observed_loss['vals']] = losses
+        # -- retrieve the best of the samples and form the return tuple
+        # the build_posterior makes all specs the same
 
-    idxs, vals = pyll.rec_eval([opt_idxs, opt_vals], memo=memo,
-            print_node_on_error=False)
+        rval_specs = [None]  # -- specs are deprecated
+        rval_results = [domain.new_result()]
+        rval_miscs = [dict(tid=new_id, cmd=domain.cmd, workdir=domain.workdir)]
 
-    # -- retrieve the best of the samples and form the return tuple
-    # the build_posterior makes all specs the same
+        miscs_update_idxs_vals(rval_miscs, idxs, vals,
+                idxs_map={fake_ids[0]: new_id},
+                assert_all_vals_used=False)
+        rval_docs = trials.new_trial_docs([new_id],
+                rval_specs, rval_results, rval_miscs)
 
-    rval_specs = [None]  # -- specs are deprecated
-    rval_results = [domain.new_result()]
-    rval_miscs = [dict(tid=new_id, cmd=domain.cmd, workdir=domain.workdir)]
+        rval.append(rval_docs)
 
-    miscs_update_idxs_vals(rval_miscs, idxs, vals,
-            idxs_map={fake_ids[0]: new_id},
-            assert_all_vals_used=False)
-    rval_docs = trials.new_trial_docs([new_id],
-            rval_specs, rval_results, rval_miscs)
-
-    return rval_docs
+    return rval
 
 

@@ -50,7 +50,7 @@ class FMinIter(object):
     cPickle_protocol = -1
 
     def __init__(self, algo, domain, trials, rstate, async=None,
-            max_queue_len=1,
+            max_queue_len=30,
             poll_interval_secs=1.0,
             max_evals=sys.maxint,
             verbose=0,
@@ -62,9 +62,10 @@ class FMinIter(object):
             self.async = trials.async
         else:
             self.async = async
+
         self.poll_interval_secs = poll_interval_secs
         self.max_queue_len = max_queue_len
-        self.max_evals = max_evals
+        self.max_evals = max_evals + max_queue_len
         self.rstate = rstate
 
         if self.async:
@@ -98,6 +99,9 @@ class FMinIter(object):
                         #    by this refresh call.
                         self.trials.refresh()
                         raise
+                    elif self.catch_eval_exceptions:
+                        self.trials.refresh()
+                        print "caught an exception trying to run a job"
                 else:
                     #logger.debug('job returned status: %s' % result['status'])
                     #logger.debug('job returned loss: %s' % result.get('loss'))
@@ -118,7 +122,7 @@ class FMinIter(object):
                 return self.trials.count_by_state_unsynced(unfinished_states)
 
             qlen = get_queue_len()
-            while qlen > 0:
+            while qlen >= self.max_queue_len:
                 if not already_printed:
                     logger.info('Waiting for %d jobs to finish ...' % qlen)
                     already_printed = True
@@ -142,10 +146,11 @@ class FMinIter(object):
             return self.trials.count_by_state_unsynced(base.JOB_STATE_NEW)
 
         stopped = False
-        while n_queued < N:
+        while n_queued < N:            
             qlen = get_queue_len()
             while qlen < self.max_queue_len and n_queued < N:
                 n_to_enqueue = min(self.max_queue_len - qlen, N - n_queued)
+                print "qlen", qlen, " max_queue_len", self.max_queue_len, " n_queued", n_queued, " N", N, "n_to_enqueue", n_to_enqueue
                 new_ids = trials.new_trial_ids(n_to_enqueue)
                 self.trials.refresh()
                 if 0:
@@ -165,6 +170,7 @@ class FMinIter(object):
                     break
 
             if self.async:
+                print "waiting ..."
                 # -- wait for workers to fill in the trials
                 time.sleep(self.poll_interval_secs)
             else:
@@ -195,6 +201,8 @@ class FMinIter(object):
 
     def exhaust(self):
         n_done = len(self.trials)
+        print "n_done", n_done
+        print "max_evals", self.max_evals
         self.run(self.max_evals - n_done, block_until_done=self.async)
         self.trials.refresh()
         return self
@@ -286,7 +294,7 @@ def fmin(fn, space, algo, max_evals, trials=None, rstate=None,
         `hyperopt.space_eval(space, best_vals)`.
 
 
-    """
+    """    
     if rstate is None:
         env_rseed = os.environ.get('HYPEROPT_FMIN_SEED', '')
         if env_rseed:
@@ -317,6 +325,7 @@ def fmin(fn, space, algo, max_evals, trials=None, rstate=None,
                     verbose=verbose)
     rval.catch_eval_exceptions = catch_eval_exceptions
     rval.exhaust()
+
     if return_argmin:
         return trials.argmin
 

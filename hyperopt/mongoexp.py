@@ -121,6 +121,7 @@ from bson import SON
 logger = logging.getLogger(__name__)
 
 from .base import JOB_STATES
+from .base import STATUS_FAIL
 from .base import (JOB_STATE_NEW, JOB_STATE_RUNNING, JOB_STATE_DONE,
         JOB_STATE_ERROR)
 from .base import Trials
@@ -972,6 +973,7 @@ class MongoWorker(object):
     def __init__(self, mj,
             poll_interval=poll_interval,
             workdir=workdir,
+            kwargs=None,
             exp_key=None,
             logfilename='logfile.txt',
             ):
@@ -986,6 +988,7 @@ class MongoWorker(object):
         self.workdir = workdir
         self.exp_key = exp_key
         self.logfilename = logfilename
+        self.kwargs = kwargs
 
     def make_log_handler(self):
         self.log_handler = logging.FileHandler(self.logfilename)
@@ -1020,6 +1023,8 @@ class MongoWorker(object):
 
         # -- don't let the cmd mess up our trial object
         spec = spec_from_misc(job['misc'])
+        spec[u'kwargs'] = self.kwargs
+        print "spec", spec, " len(spec)", len(spec)
 
         ctrl = MongoCtrl(
                 trials=MongoTrials(mj, exp_key=job['exp_key'], refresh=False),
@@ -1056,13 +1061,19 @@ class MongoWorker(object):
                     worker_fn = bandit.evaluate
                 elif cmd_protocol == 'driver_attachment':
                     #name = 'driver_attachment_%s' % job['exp_key']
-                    blob = ctrl.trials.attachments[cmd[1]]
+                    try:
+                        blob = ctrl.trials.attachments[cmd[1]]
+                    except:
+                        raise
                     bandit_name, bandit_args, bandit_kwargs = cPickle.loads(blob)
                     worker_fn = json_call(bandit_name,
                             args=bandit_args,
                             kwargs=bandit_kwargs).evaluate
                 elif cmd_protocol == 'domain_attachment':
-                    blob = ctrl.trials.attachments[cmd[1]]
+                    try:
+                        blob = ctrl.trials.attachments[cmd[1]]                    
+                    except:
+                        raise
                     try:
                         domain = cPickle.loads(blob)
                     except BaseException, e:
@@ -1073,7 +1084,14 @@ class MongoWorker(object):
                     raise ValueError('Unrecognized cmd protocol', cmd_protocol)
 
                 with temp_dir(workdir, erase_created_workdir), working_dir(workdir):
-                    result = worker_fn(spec, ctrl)
+                    print worker_fn
+                    result = {
+                                'loss' : 1.0,
+                                'status' : STATUS_FAIL
+                             }
+                    if len(spec) >= 5:
+                        result = worker_fn(spec, ctrl)
+                    print result
                     result = SONify(result)
             except BaseException, e:
                 #XXX: save exception to database, but if this fails, then
@@ -1082,8 +1100,18 @@ class MongoWorker(object):
                 ctrl.checkpoint()
                 mj.update(job,
                         {'state': JOB_STATE_ERROR,
-                        'error': (str(type(e)), str(e))})
-                raise
+                        'error': (str(type(e)), str(e), spec)})
+                import traceback
+                import sys
+                exc_type, exc_value, exc_traceback = sys.exc_info()
+                print "error running function - mongoexp"
+                f = open("./log_mongo.txt","ab")
+                traceback.print_tb(exc_traceback, limit=None, file=f)
+                f.write(str(spec) + '\n\n')
+                f.flush()
+                f.close()
+                pass
+                #raise
         finally:
             if self.logfilename:
                 root_logger.removeHandler(self.log_handler)
